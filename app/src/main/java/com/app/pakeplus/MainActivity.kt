@@ -19,6 +19,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.Gravity
+import android.webkit.CookieManager
 import android.webkit.PermissionRequest
 import android.webkit.JavascriptInterface
 import android.webkit.URLUtil
@@ -233,6 +234,19 @@ class MainActivity : AppCompatActivity() {
             window.decorView.post { hideSystemUI() }
         }
         webView = findViewById<WebView>(R.id.webview)
+
+        // ---- Cookie / 登录状态持久化 ----
+        // 允许 Cookie，并且允许第三方 Cookie：iCloud 等站点的登录框位于 apple.com 的
+        // iframe 中，若禁用第三方 Cookie，登录后拿不到可持久化的授权 Cookie，
+        // 表现为杀掉 App 后需要重新登录。
+        try {
+            val cookieManager = CookieManager.getInstance()
+            cookieManager.setAcceptCookie(true)
+            cookieManager.setAcceptThirdPartyCookies(webView, true)
+        } catch (e: Exception) {
+            Log.w("MainActivity", "init cookie manager failed", e)
+        }
+
         webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
@@ -354,6 +368,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        // 进程随时可能被系统回收，暂停时立即把 Cookie 落盘，保证登录状态不丢
+        persistCookies()
         webView.onPause()
         // 如果正在全屏播放视频，暂停播放
         if (customView != null) {
@@ -381,8 +397,26 @@ class MainActivity : AppCompatActivity() {
         if (customView != null) {
             hideCustomView()
         }
+        // 销毁前再落盘一次 Cookie
+        persistCookies()
         webView.destroy()
         super.onDestroy()
+    }
+
+    /** 将 WebView 中的 Cookie 立即写入磁盘（WebView 默认异步写盘，进程被杀会丢） */
+    private fun persistCookies() {
+        try {
+            CookieManager.getInstance().flush()
+        } catch (e: Exception) {
+            Log.w("MainActivity", "flush cookies failed", e)
+        }
+    }
+
+    /** 后台线程落盘 Cookie，避免阻塞主线程（用于页面加载完成等高频时机） */
+    private fun persistCookiesAsync() {
+        Thread {
+            persistCookies()
+        }.start()
     }
 
     @Deprecated("Deprecated in Java")
@@ -1045,6 +1079,9 @@ class MainActivity : AppCompatActivity() {
             """.trimIndent()
 
             view?.evaluateJavascript(blobInterceptor, null)
+
+            // 登录/跳转完成后立即把 Cookie 落盘，防止刚登录就杀掉 App 导致状态丢失
+            persistCookiesAsync()
         }
 
         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
